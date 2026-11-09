@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="frendoku-build" content="notes-undo-1">
 <meta name="theme-color" content="#101214">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Frendoku</title>
@@ -29,7 +30,7 @@
 <div class="actions"><button id="check">Check</button><button id="reset">Reset</button></div>
 <div id="status" class="status" role="status" aria-live="polite" aria-atomic="true"></div>
 <p class="help">Dotted clues are locked. Red marks a conflict or a mistake found by Check. A palette check means exactly nine copies are on the board, not necessarily correct.</p>
-<p class="help">Notes use fixed 3 × 3 positions. Impossible notes are blocked. Placing a fren clears that cell’s notes and removes it from peer notes. Removed notes don’t automatically return. <kbd>1–9</kbd> follows palette order; <kbd>N</kbd> toggles Notes; <kbd>Delete</kbd> erases.</p>
+<p class="help">Notes use fixed 3 × 3 positions. Impossible notes are blocked. Placing a fren clears that cell’s notes and removes it from peer notes. Erasing or replacing a placed fren restores the notes that placement removed, where they’re still valid. <kbd>1–9</kbd> follows palette order; <kbd>N</kbd> toggles Notes; <kbd>Delete</kbd> erases.</p>
 <p class="fine">Shuffle frens changes faces only, keeping your entries and notes. Reset keeps the same puzzle and lineup. Every puzzle has one solution; Easy / Medium / Hard target 40 / 32 / 26 clues, with extra clues kept when needed for uniqueness.</p>
 <p id="save-status" class="fine"></p>
 <details id="roster-details"><summary>Roster · all 21 frens</summary><div id="roster" class="roster"></div></details>
@@ -47,6 +48,14 @@ const peers=(a,b)=>Math.floor(a/9)===Math.floor(b/9)||a%9===b%9||boxOf(a)===boxO
 function shuffle(input){const a=input.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
 function allowedNotes(board,i){if(board[i])return 0;let mask=511;for(let j=0;j<81;j++)if(board[j]&&peers(i,j))mask&=~(1<<(board[j]-1));return mask;}
 function cleanNotes(board,notes){return notes.map((mask,i)=>mask&allowedNotes(board,i));}
+// Per-cell undo records: what placing fren v in cell i removed (its own notes and peer notes).
+const emptySnaps=()=>Array(81).fill(null);
+function undoPlacement(board,notes,snaps,i){
+ const s=snaps[i];snaps[i]=null;if(!s)return;
+ notes[i]=s.own&allowedNotes(board,i);const bit=1<<(s.v-1);
+ // Restore peer notes only where still valid now (peer empty, fren not placed among its peers).
+ for(const j of s.peers)if(allowedNotes(board,j)&bit)notes[j]|=bit;
+}
 function getConflicts(board){const conflicts=new Set();for(let i=0;i<81;i++)if(board[i])for(let j=i+1;j<81;j++)if(board[i]===board[j]&&peers(i,j)){conflicts.add(i);conflicts.add(j);}return conflicts;}
 function solutionCount(input){
  const board=input.slice(),rows=Array(9).fill(0),cols=Array(9).fill(0),boxes=Array(9).fill(0);
@@ -76,7 +85,7 @@ function makeGame(d){
  }
  return best;
 }
-function freshState(d='Medium'){const game=makeGame(d);return{version:1,difficulty:d,...game,board:game.start.slice(),notes:Array(81).fill(0),selected:-1,notesMode:false,wrong:[],message:''};}
+function freshState(d='Medium'){const game=makeGame(d);return{version:1,difficulty:d,...game,board:game.start.slice(),notes:Array(81).fill(0),snaps:emptySnaps(),selected:-1,notesMode:false,wrong:[],message:''};}
 function shuffledState(prev){const previous=new Set(prev.lineup),lineup=shuffle(rosterIndices).slice(0,9);if(lineup.every(id=>previous.has(id))){const other=shuffle(rosterIndices.filter(id=>!previous.has(id)));lineup[Math.floor(Math.random()*9)]=other[0];}return{...prev,lineup,message:'Frens shuffled. Same puzzle, entries and notes — only the faces changed.'};}
 function applyValue(prev,v){
  const selected=prev.selected;
@@ -87,17 +96,22 @@ function applyValue(prev,v){
  }
  const notes=cleanNotes(prev.board,prev.notes);
  if(prev.notesMode){notes[selected]=v?notes[selected]^(1<<(v-1)):0;return{...prev,notes,message:''};}
- const board=prev.board.slice();board[selected]=v;notes[selected]=0;
- return{...prev,board,notes:cleanNotes(board,notes),wrong:prev.wrong.filter(i=>i!==selected),message:''};
+ const board=prev.board.slice(),snaps=(prev.snaps||emptySnaps()).slice(),old=board[selected];
+ if(old===v)return{...prev,notes,message:''};
+ board[selected]=0;if(old)undoPlacement(board,notes,snaps,selected);
+ if(v){const bit=1<<(v-1);snaps[selected]={v,own:notes[selected],peers:indices.filter(j=>j!==selected&&peers(j,selected)&&(notes[j]&bit))};board[selected]=v;notes[selected]=0;}
+ return{...prev,board,notes:cleanNotes(board,notes),snaps,wrong:prev.wrong.filter(i=>i!==selected),message:''};
 }
 function validateSaved(x){
  const ints=(a,len,min,max)=>Array.isArray(a)&&a.length===len&&a.every(v=>Number.isInteger(v)&&v>=min&&v<=max);
  if(!x||x.version!==1||!Object.hasOwn(targets,x.difficulty)||!ints(x.start,81,0,9)||!ints(x.solution,81,1,9)||!ints(x.board,81,0,9)||!ints(x.notes,81,0,511)||!ints(x.lineup,9,0,roster.length-1)||new Set(x.lineup).size!==9)return null;
  if(getConflicts(x.solution).size||x.start.some((v,i)=>v&&(v!==x.solution[i]||x.board[i]!==v))||solutionCount(x.start)!==1)return null;
- return{version:1,difficulty:x.difficulty,start:x.start,solution:x.solution,board:x.board,notes:cleanNotes(x.board,x.notes),lineup:x.lineup,selected:Number.isInteger(x.selected)&&x.selected>=0&&x.selected<81?x.selected:-1,notesMode:!!x.notesMode,wrong:Array.isArray(x.wrong)?x.wrong.filter(i=>Number.isInteger(i)&&i>=0&&i<81&&x.board[i]&&x.board[i]!==x.solution[i]):[],message:'Progress restored.'};
+ // Saves from before undo records have no snaps; invalid or stale records are dropped.
+ const snaps=Array.isArray(x.snaps)&&x.snaps.length===81?x.snaps.map((r,i)=>r&&Number.isInteger(r.v)&&r.v>=1&&r.v<=9&&r.v===x.board[i]&&!x.start[i]&&Number.isInteger(r.own)&&r.own>=0&&r.own<=511&&Array.isArray(r.peers)&&r.peers.every(j=>Number.isInteger(j)&&j>=0&&j<81&&j!==i&&peers(i,j))?{v:r.v,own:r.own,peers:[...new Set(r.peers)]}:null):emptySnaps();
+ return{version:1,difficulty:x.difficulty,start:x.start,solution:x.solution,board:x.board,notes:cleanNotes(x.board,x.notes),snaps,lineup:x.lineup,selected:Number.isInteger(x.selected)&&x.selected>=0&&x.selected<81?x.selected:-1,notesMode:!!x.notesMode,wrong:Array.isArray(x.wrong)?x.wrong.filter(i=>Number.isInteger(i)&&i>=0&&i<81&&x.board[i]&&x.board[i]!==x.solution[i]):[],message:'Progress restored.'};
 }
 // Node tests can use the exact shipped engine without a DOM or network.
-if(typeof module!=='undefined'&&module.exports){module.exports={roster,targets,indices,peers,shuffle,allowedNotes,cleanNotes,getConflicts,solutionCount,fullSolution,makeGame,freshState,shuffledState,applyValue,validateSaved};return;}
+if(typeof module!=='undefined'&&module.exports){module.exports={roster,targets,indices,peers,shuffle,allowedNotes,cleanNotes,getConflicts,solutionCount,fullSolution,makeGame,freshState,shuffledState,applyValue,validateSaved,undoPlacement};return;}
 const $=id=>document.getElementById(id),storageKey='frendoku.web.v1';
 let storageAvailable=true,state,busy=false;
 try{const saved=localStorage.getItem(storageKey);state=saved?validateSaved(JSON.parse(saved)):null;}catch{storageAvailable=false;}
@@ -146,7 +160,7 @@ $('palette').addEventListener('click',e=>{if(busy)return;const button=e.target.c
 $('notes-toggle').addEventListener('click',()=>{if(!busy)commit({...state,notesMode:!state.notesMode,message:''});});
 $('shuffle').addEventListener('click',()=>{if(!busy)commit(shuffledState(state));});
 $('check').addEventListener('click',()=>{if(busy)return;const wrong=indices.filter(i=>state.board[i]&&state.board[i]!==state.solution[i]);commit({...state,wrong,message:wrong.length?`${wrong.length} wrong ${wrong.length===1?'entry':'entries'} marked in red.`:state.board.includes(0)?'No mistakes so far. Keep going!':'Every fren is in the right place!'});});
-$('reset').addEventListener('click',()=>{if(!busy)commit({...state,board:state.start.slice(),notes:Array(81).fill(0),wrong:[],notesMode:false,message:'Puzzle and notes reset. The lineup and clues are unchanged.'});});
+$('reset').addEventListener('click',()=>{if(!busy)commit({...state,board:state.start.slice(),notes:Array(81).fill(0),snaps:emptySnaps(),wrong:[],notesMode:false,message:'Puzzle and notes reset. The lineup and clues are unchanged.'});});
 function newPuzzle(d){if(busy)return;busy=true;$('status').textContent='Making a unique '+d.toLowerCase()+' puzzle…';document.querySelectorAll('.toolbar button').forEach(b=>b.disabled=true);setTimeout(()=>{try{commit(freshState(d));}finally{busy=false;document.querySelectorAll('.toolbar button').forEach(b=>b.disabled=false);}},20);}
 $('new-puzzle').addEventListener('click',()=>newPuzzle(state.difficulty));document.querySelectorAll('[data-difficulty]').forEach(b=>b.addEventListener('click',()=>newPuzzle(b.dataset.difficulty)));
 document.addEventListener('keydown',e=>{
